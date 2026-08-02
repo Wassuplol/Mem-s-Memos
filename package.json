@@ -1,6 +1,6 @@
 {
     "name": "mems-memos",
-    "version": "1.1.2",
+    "version": "1.1.3",
     "description": "Mem's Memos — a 12-tier RAG memory bureau for SillyTavern (Archivist's Desk).",
     "type": "module",
     "private": true,

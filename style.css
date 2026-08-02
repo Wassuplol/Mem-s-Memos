@@ -1076,7 +1076,12 @@
   font-size: 11px;
   letter-spacing: .1em;
 }
-.mm-empty .mm-stamp { font-size: 15px; opacity: .65; }
+.mm-empty .mm-stamp {
+  font-size: 15px;
+  opacity: .85;
+  mix-blend-mode: normal;  /* multiply is for paper; on the dark desk it hides the stamp */
+  color: #d6564a;
+}
 
 /* ============================================================================
    LAUNCHER BUTTON + MODAL DESK HOST (centered overlay, megumin-style)
