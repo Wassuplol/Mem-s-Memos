@@ -1,0 +1,23 @@
+{
+    "display_name": "Mem's Memos",
+    "loading_order": 42,
+    "requires": [],
+    "optional": [],
+    "dependencies": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "Mem's Memos Bureau",
+    "version": "1.0.0",
+    "homePage": "https://github.com/mems-memos/mems-memos",
+    "auto_update": false,
+    "minimum_client_version": "1.12.0",
+    "i18n": {},
+    "hooks": {
+        "install": "mmOnInstall",
+        "update": "mmOnUpdate",
+        "delete": "mmOnDelete",
+        "enable": "mmOnEnable",
+        "disable": "mmOnDisable",
+        "activate": "mmOnActivate"
+    }
+}

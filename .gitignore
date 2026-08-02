@@ -1,0 +1,7 @@
+node_modules/
+backups/
+*.log
+.DS_Store
+Thumbs.db
+_fix_escape.cjs
+_testout.txt
