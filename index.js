@@ -878,7 +878,9 @@ export function createBureau(hostInstance) {
     }
 
     function applyDrawerWidth(panel, w) {
-        panel.style.width = `${Math.min(1100, Math.max(420, w || 920))}px`;
+        // Old right-side drawer widths (≤ 920) bump to the landscape default.
+        const width = !w || w < 920 ? 1240 : w;
+        panel.style.width = `${Math.min(1600, Math.max(920, width))}px`;
     }
 
     function makeResizable(panel) {

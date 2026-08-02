@@ -184,71 +184,72 @@
 .mm-iconbtn:hover { border-color: var(--mm-amber); color: var(--mm-amber); }
 
 /* ============================================================================
-   BODY GRID — rail | stage | ledger
+   BODY GRID — horizontal tab bar on top | stage | ledger
    ============================================================================ */
 .mm-body {
   flex: 1 1 auto;
   display: grid;
-  grid-template-columns: 44px minmax(0, 1fr) 220px;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  grid-template-rows: auto minmax(0, 1fr);
   min-height: 0;
 }
-.mm-root.mm-ledger-collapsed .mm-body { grid-template-columns: 44px minmax(0, 1fr) 0; }
+.mm-root.mm-ledger-collapsed .mm-body { grid-template-columns: minmax(0, 1fr) 0; }
 .mm-root.mm-ledger-collapsed .mm-ledger { display: none; }
 @media (max-width: 560px) {
-  .mm-body { grid-template-columns: 44px minmax(0, 1fr) 0; }
+  .mm-body { grid-template-columns: minmax(0, 1fr) 0; }
   .mm-ledger { display: none; }
 }
 
-/* ---------- Rail (vertical folder tabs) ------------------------------------ */
+/* ---------- Rail (horizontal folder tabs across the top) -------------------- */
 .mm-rail {
+  grid-column: 1 / -1;
   background: var(--mm-desk-800);
-  border-right: 1px solid var(--mm-desk-line);
+  border-bottom: 1px solid var(--mm-desk-line);
   display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 10px 0;
-  overflow-y: auto;
+  flex-direction: row;
+  align-items: flex-end;
+  gap: 4px;
+  padding: 8px 10px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 .mm-tab {
   appearance: none;
   border: none;
   background: var(--mm-desk-700);
   color: rgba(242, 232, 211, .62);
-  border-left: 3px solid var(--mm-desk-line);
-  border-radius: 0 4px 4px 0;
-  padding: 10px 4px;
+  border-bottom: 3px solid var(--mm-desk-line);
+  border-radius: 5px 5px 0 0;
+  padding: 7px 12px 5px;
   cursor: pointer;
-  display: flex;
-  flex-direction: column;
+  display: inline-flex;
+  flex-direction: row;
   align-items: center;
-  gap: 6px;
-  width: 38px;
-  margin-right: 6px;
+  gap: 7px;
   position: relative;
-  transition: transform 160ms ease-out, background 160ms ease-out, color 160ms ease-out;
+  white-space: nowrap;
+  transition: background 160ms ease-out, color 160ms ease-out, border-color 160ms ease-out;
 }
 .mm-tab-label {
-  writing-mode: vertical-rl;
   font-family: var(--mm-font-mono);
-  font-size: 9px;
-  letter-spacing: .18em;
+  font-size: 9.5px;
+  letter-spacing: .14em;
   text-transform: uppercase;
 }
 .mm-tab i { font-size: 12px; }
 .mm-tab:hover { color: var(--mm-paper); background: #2e2719; }
 .mm-tab[aria-selected='true'] {
-  transform: translateX(6px);
   background: var(--mm-paper);
   color: var(--mm-ink);
 }
-.mm-tab[data-tab='blotter']     { border-left-color: var(--mm-amber); }
-.mm-tab[data-tab='reading']     { border-left-color: var(--mm-verdigris); }
-.mm-tab[data-tab='catalog']     { border-left-color: var(--mm-blue-ink); }
-.mm-tab[data-tab='timeline']    { border-left-color: var(--mm-stamp-red); }
-.mm-tab[data-tab='strings']     { border-left-color: var(--mm-paper-edge); }
-.mm-tab[data-tab='dossier']     { border-left-color: var(--mm-ink-soft); }
-.mm-tab[data-tab='settings']    { border-left-color: var(--mm-desk-line); }
-.mm-tab[aria-selected='true'][data-tab='settings'] { border-left-color: var(--mm-amber); }
+.mm-tab[data-tab='blotter']     { border-bottom-color: var(--mm-amber); }
+.mm-tab[data-tab='reading']     { border-bottom-color: var(--mm-verdigris); }
+.mm-tab[data-tab='catalog']     { border-bottom-color: var(--mm-blue-ink); }
+.mm-tab[data-tab='timeline']    { border-bottom-color: var(--mm-stamp-red); }
+.mm-tab[data-tab='strings']     { border-bottom-color: var(--mm-paper-edge); }
+.mm-tab[data-tab='dossier']     { border-bottom-color: var(--mm-ink-soft); }
+.mm-tab[data-tab='settings']    { border-bottom-color: var(--mm-desk-line); }
+.mm-tab[aria-selected='true'][data-tab='settings'] { border-bottom-color: var(--mm-amber); }
 
 /* ---------- Stage ----------------------------------------------------------- */
 .mm-stage {
@@ -1099,8 +1100,8 @@
 }
 .mm-modal-panel {
   position: relative;
-  width: min(920px, 92vw);
-  height: min(860px, 92vh);
+  width: min(1240px, 94vw);
+  height: min(820px, 86vh);
   display: flex;
   flex-direction: column;
   box-shadow: 0 30px 80px rgba(0, 0, 0, .7);
