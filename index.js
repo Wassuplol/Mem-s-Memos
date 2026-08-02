@@ -1,21 +1,25 @@
 /**
  * MEM'S MEMOS — entry point.
  *
- * Fail-safe by design: if the SillyTavern API is missing (opened as plain
- * files, old ST, or a broken host), a dev-mock adapter keeps the extension
- * fully loadable and the desk interactive. Nothing here ever touches ST core
- * files, generation presets, or sampler settings. Memory reaches the prompt
- * ONLY through the extension-safe injection slot, with shadow fallback.
+ * Follows the proven third-party extension pattern (st-qdrant-memory et al):
+ *   - window.jQuery(async () => {...}) init
+ *   - settings UI appended to #extensions_settings2 + applyInlineDrawerListeners()
+ *   - globalThis.mmInterceptor generation interceptor (chat.splice depth slicing)
+ *   - window.eventSource for message events
+ *   - window.toastr for user feedback
+ *
+ * Fail-safe: missing SillyTavern → dev-mock keeps everything loadable.
+ * Never touches ST core files, presets, or sampler settings.
  */
 
-import { MODULE_NAME, mergeSettings, validateSettings, isEnabledFor, defaultSettings } from './src/config/settings.js';
+import { MODULE_NAME, mergeSettings, validateSettings, isEnabledFor } from './src/config/settings.js';
 import { logger } from './src/utils/logger.js';
-import { createBus, nowIso, truncateWords, uuid, estimateTokens } from './src/utils/helpers.js';
+import { createBus, nowIso, truncateWords } from './src/utils/helpers.js';
 import { ModelRouter } from './src/ai/router.js';
 import { WriteAheadQueue } from './src/storage/adapter.js';
 import { QdrantStore } from './src/storage/qdrant.js';
 import { createMetadataStore, LocalVectorStore } from './src/storage/indexeddb.js';
-import { StmManager, STM_BUFFERS } from './src/engine/stm.js';
+import { StmManager } from './src/engine/stm.js';
 import { ExtractionEngine } from './src/engine/extraction.js';
 import { EpistemicEngine } from './src/engine/epistemic.js';
 import { StateEngine } from './src/engine/states.js';
@@ -34,119 +38,117 @@ import { LedgerRoom } from './src/ui/ledger.js';
 import { registerSlashCommands } from './src/commands/slash.js';
 
 // ---------------------------------------------------------------------------
-// HOST ADAPTER — SillyTavern when present, dev mock when not.
+// GLOBALS (resolved at init time, never at import time)
 // ---------------------------------------------------------------------------
+let bureau = null;
+let host = null;
 
-function createHost() {
+function getCtx() {
     const st = globalThis.SillyTavern;
     if (st && typeof st.getContext === 'function') {
-        try {
-            const ctx = st.getContext();
-            if (ctx && ctx.extensionSettings) return new StHost(ctx);
-        } catch (err) {
-            console.warn("[Mem's Memos] SillyTavern context unavailable, using dev mock", err);
-        }
+        try { return st.getContext(); } catch { /* fall through */ }
     }
-    return new MockHost();
+    return null;
 }
 
+function toast(msg, type = 'info', title = "Mem's Memos", opts = {}) {
+    const t = globalThis.toastr;
+    if (t && typeof t[type] === 'function') {
+        t[type](msg, title, opts);
+    }
+}
+
+function saveSt() {
+    const ctx = getCtx();
+    ctx?.saveSettingsDebounced?.();
+}
+
+// ---------------------------------------------------------------------------
+// HOST ADAPTER — wraps ST context for the bureau
+// ---------------------------------------------------------------------------
 class StHost {
-    constructor(ctx) {
-        this.ctx = ctx;
+    constructor() {
         this.kind = 'sillytavern';
     }
-
     getSettings() {
-        return this.ctx.extensionSettings[MODULE_NAME];
+        const ctx = getCtx();
+        return ctx?.extensionSettings?.[MODULE_NAME] ?? null;
     }
-    setSettings(value) {
-        this.ctx.extensionSettings[MODULE_NAME] = value;
+    setSettings(v) {
+        const ctx = getCtx();
+        if (ctx) ctx.extensionSettings[MODULE_NAME] = v;
     }
-    saveSettings() {
-        this.ctx.saveSettingsDebounced?.();
-    }
+    saveSettings() { saveSt(); }
 
-    /** Extension-safe context slot only. Depth follows the Author's Note
-     *  convention (N messages from the end; 0 = at the very end). */
     inject(text, { depth = 1 } = {}) {
-        const ctx = this.ctx;
-        if (typeof ctx.setExtensionPrompt !== 'function') return false;
-        // position 1 (in-prompt) + depth; never touches Author's Note itself.
-        ctx.setExtensionPrompt(MODULE_NAME, text, 1, Math.max(0, depth), false, 0);
+        // We don't use setExtensionPrompt — mmInterceptor handles injection.
+        // This is a no-op kept for the InjectionEngine contract.
         return true;
     }
-    clearInjection() {
-        const ctx = this.ctx;
-        if (typeof ctx.setExtensionPrompt === 'function') {
-            try { ctx.setExtensionPrompt(MODULE_NAME, '', 1, 1, false, 0); } catch { /* best effort */ }
-        }
-    }
+    clearInjection() { /* interceptor handles it */ }
 
     getScope() {
-        const ctx = this.ctx;
-        const chatId = ctx.chatId != null ? String(ctx.chatId) : null;
-        const charIdx = ctx.characterId != null ? Number(ctx.characterId) : null;
-        const character = Number.isInteger(charIdx) ? ctx.characters?.[charIdx] : null;
+        const ctx = getCtx();
+        const chatId = ctx?.chatId != null ? String(ctx.chatId) : null;
+        const charIdx = ctx?.characterId != null ? Number(ctx.characterId) : null;
+        const character = Number.isInteger(charIdx) ? ctx?.characters?.[charIdx] : null;
         return {
             chatId,
             chatName: chatId,
             characterId: character?.name || null,
-            characterName: character?.name || ctx.name2 || null,
-            personaId: ctx.name1 || null,
-            userId: ctx.name1 || null,
+            characterName: character?.name || ctx?.name2 || null,
+            personaId: ctx?.name1 || null,
+            userId: ctx?.name1 || null,
             date: new Date().toLocaleDateString(),
-            isGroup: !!ctx.groups?.length && !!ctx.groupId,
+            isGroup: !!ctx?.groups?.length && !!ctx?.groupId,
         };
     }
 
     getRecentMessages(n = 8) {
-        const chat = this.ctx.chat || [];
+        const ctx = getCtx();
+        const chat = ctx?.chat || [];
         return chat.slice(-n).map((m) => ({ name: m.name, text: m.mes, isUser: !!m.is_user }));
     }
     getLastUserMessage() {
-        const chat = this.ctx.chat || [];
+        const ctx = getCtx();
+        const chat = ctx?.chat || [];
         for (let i = chat.length - 1; i >= 0; i--) {
             if (chat[i].is_user) return chat[i].mes;
         }
         return '';
     }
     messageText(index) {
-        return this.ctx.chat?.[index]?.mes || '';
+        const ctx = getCtx();
+        return ctx?.chat?.[index]?.mes || '';
     }
     messageInfo(index) {
-        const m = this.ctx.chat?.[index];
+        const ctx = getCtx();
+        const m = ctx?.chat?.[index];
         return m ? { name: m.name, isUser: !!m.is_user } : null;
     }
 
-    /** Subscribe to ST events. Handler names resolve via event_types. */
     on(eventName, handler) {
-        const { eventSource, event_types } = this.ctx;
-        if (!eventSource?.on) return () => {};
-        const type = event_types?.[eventName] || eventName;
-        eventSource.on(type, handler);
-        return () => eventSource.off?.(type, handler);
+        const es = globalThis.eventSource;
+        if (!es?.on) return () => {};
+        const types = globalThis.event_types || {};
+        const type = types[eventName] || eventName;
+        es.on(type, handler);
+        return () => es.off?.(type, handler);
     }
 
-    chatContainer() {
-        return document.querySelector('#chat');
-    }
-    messageSelector() {
-        return '.mes';
-    }
-    /** message DOM node → chat index, via data attributes ST renders. */
+    chatContainer() { return document.querySelector('#chat'); }
+    messageSelector() { return '.mes'; }
     messageIndexFor(node) {
         const attr = node.getAttribute('mesid') ?? node.dataset?.mesid;
         if (attr != null && attr !== '') return Number(attr);
-        // fallback: index among .mes nodes
         const all = [...document.querySelectorAll('#chat .mes')];
         return all.indexOf(node);
     }
 
-    /** Mount point for the drawer launcher — ST-conventional extensions menu
-     *  item (puzzle dropdown), with floating fallback. */
     mountLauncher(onClick) {
         const id = 'mm-launcher';
         if (document.getElementById(id)) return document.getElementById(id);
+        const $ = globalThis.$;
         const menu = document.querySelector('#extensionsMenu') || document.querySelector('#extensions-menu');
         const btn = document.createElement('div');
         btn.id = id;
@@ -154,8 +156,7 @@ class StHost {
         btn.setAttribute('tabindex', '0');
         btn.setAttribute('aria-label', "Open Mem's Memos");
         btn.setAttribute('title', "Mem's Memos — open the Archivist's Desk");
-        if (menu) {
-            // match ST's list-group-item menu rows used by other extensions
+        if (menu && $) {
             btn.className = 'list-group-item flex-container flexGap5 interactable';
             btn.innerHTML = '<i class="fa-solid fa-stamp extensionsMenuExtensionButton" aria-hidden="true"></i><span>Mem\'s Memos</span>';
             menu.appendChild(btn);
@@ -171,17 +172,16 @@ class StHost {
     }
 
     drawerHost() {
-        let host = document.getElementById('mm-drawer-host');
-        if (host) return host;
-        host = document.createElement('div');
-        host.id = 'mm-drawer-host';
-        host.className = 'mm-drawer-host mm-hidden';
-        document.body.appendChild(host);
-        return host;
+        let el = document.getElementById('mm-drawer-host');
+        if (el) return el;
+        el = document.createElement('div');
+        el.id = 'mm-drawer-host';
+        el.className = 'mm-drawer-host mm-hidden';
+        document.body.appendChild(el);
+        return el;
     }
 }
 
-/** Dev mock — keeps the extension loadable without SillyTavern. */
 class MockHost {
     constructor() {
         this.kind = 'mock';
@@ -189,7 +189,7 @@ class MockHost {
         this.chat = [];
         this.injected = null;
         this.listeners = new Map();
-        console.warn("[Mem's Memos] SillyTavern not found — dev mock active (desk fully usable, injection is shadowed).");
+        console.warn("[Mem's Memos] SillyTavern not found — dev mock active.");
     }
     getSettings() { return this.settings; }
     setSettings(v) { this.settings = v; }
@@ -199,10 +199,7 @@ class MockHost {
     loadPersisted() {
         try { return JSON.parse(localStorage.getItem('mems-memos-settings') || 'null'); } catch { return null; }
     }
-    inject(text, { depth = 1 } = {}) {
-        this.injected = { text, depth };
-        return true; // mock accepts, desk shows what WOULD be injected
-    }
+    inject(text, { depth = 1 } = {}) { this.injected = { text, depth }; return true; }
     clearInjection() { this.injected = null; }
     getScope() {
         return {
@@ -220,9 +217,7 @@ class MockHost {
         this.listeners.get(evt).add(fn);
         return () => this.listeners.get(evt)?.delete(fn);
     }
-    emit(evt, payload) {
-        for (const fn of this.listeners.get(evt) ?? []) fn(payload);
-    }
+    emit(evt, payload) { for (const fn of this.listeners.get(evt) ?? []) fn(payload); }
     chatContainer() { return null; }
     messageSelector() { return '.mes'; }
     messageIndexFor() { return -1; }
@@ -236,47 +231,44 @@ class MockHost {
         return btn;
     }
     drawerHost() {
-        let host = document.getElementById('mm-drawer-host');
-        if (!host) {
-            host = document.createElement('div');
-            host.id = 'mm-drawer-host';
-            host.className = 'mm-drawer-host';
-            document.body.appendChild(host);
+        let el = document.getElementById('mm-drawer-host');
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'mm-drawer-host';
+            el.className = 'mm-drawer-host';
+            document.body.appendChild(el);
         }
-        return host;
+        return el;
     }
 }
 
 // ---------------------------------------------------------------------------
-// BUREAU — wires every subsystem together.
+// BUREAU — wires every subsystem together
 // ---------------------------------------------------------------------------
-
-let bureau = null;
-
-export function createBureau(host) {
+export function createBureau(hostInstance) {
+    host = hostInstance;
     const bus = createBus();
 
-    // --- settings (merge + validate + persist) --------------------------------
+    // --- settings
     const persisted = host.kind === 'mock' ? host.loadPersisted() : host.getSettings();
     const settings = validateSettings(mergeSettings(persisted));
     host.setSettings(settings);
     const getSettings = () => settings;
     const saveSettings = () => { validateSettings(settings); host.saveSettings(); };
     logger.setLevel(settings.ui.logLevel);
+    const getScope = () => host.getScope();
 
-        const getScope = () => host.getScope();
-
-    // --- test seam: allow injection of fetch + storage doubles under Node ------
+    // --- test seam
     const testDeps = host._testDeps || {};
 
-    // --- AI + storage -----------------------------------------------------------
+    // --- AI + storage
     const router = new ModelRouter(settings, { fetchFn: testDeps.fetchFn });
     const qdrant = new QdrantStore(settings.qdrant, { bridge: settings.bridge, fetchFn: testDeps.fetchFn });
     let meta = null;
     let localVectors = null;
     let wal = null;
-    let extraction = null; // wired below (stm references it in a closure)
-    let desk = null;       // wired below (injection emit closure references it)
+    let extraction = null;
+    let desk = null;
     let rooms = null;
 
     const stm = new StmManager({
@@ -308,7 +300,7 @@ export function createBureau(host) {
         retrieval, states, epistemic, stm, getSettings,
         emit: (kind, payload) => {
             bus.emit(kind, payload);
-            if (kind === 'injection-failed') desk?.toast('Injection failed — shadow mode. Block is copyable in RECALL.', 'warn', 6000);
+            if (kind === 'injection-failed') toast('Injection failed — shadow mode. Block is copyable in RECALL.', 'warning');
             if (kind === 'injected') refreshMsgDots();
         },
     });
@@ -318,7 +310,7 @@ export function createBureau(host) {
         emit: (kind, payload) => bus.emit(kind, payload),
     });
 
-    // --- bureau context shared by rooms + commands ----------------------------------
+    // --- bureau context shared by rooms + commands
     const ctx = {
         host, bus, desk, router, getSettings, saveSettings, getScope,
         get meta() { return meta; },
@@ -332,7 +324,7 @@ export function createBureau(host) {
             const scope = getScope();
             if (scope.chatId) settings.enabledChats[scope.chatId] = !!v;
             saveSettings();
-            desk.refreshLetterhead();
+            desk?.refreshLetterhead?.();
         },
         validateAndSave: saveSettings,
         rebuildStorage,
@@ -345,7 +337,7 @@ export function createBureau(host) {
         importData,
         wipeAll,
         runEval,
-        showTrace: (id) => showTrace(id),
+        showTrace: (id) => traceReport(id),
         showLastTrace: () => showLastTrace(),
         setMode,
         statusReport,
@@ -355,9 +347,10 @@ export function createBureau(host) {
         worldReport,
         knowsReport,
         traceReport: (id) => traceReport(id),
+        toggleDrawer: () => toggleDrawer(),
     };
 
-    // --- UI (after ctx exists — rooms take it by reference) ----------------------
+    // --- UI (after ctx exists)
     desk = new Desk({
         getSettings,
         getScope,
@@ -378,7 +371,7 @@ export function createBureau(host) {
     for (const [id, room] of Object.entries(rooms)) desk.registerRoom(id, room);
     ctx.desk = desk;
 
-    // --- storage bootstrap --------------------------------------------------------
+    // --- storage bootstrap
     async function rebuildStorage() {
         try {
             meta = meta || (await createMetadataStore());
@@ -387,7 +380,7 @@ export function createBureau(host) {
             meta = null;
         }
         if (!meta) {
-            desk?.toast('IndexedDB unavailable — memory will not persist this session.', 'err', 8000);
+            toast('IndexedDB unavailable — memory will not persist this session.', 'error', "Mem's Memos", { timeOut: 8000 });
             return;
         }
         stm.meta = meta;
@@ -396,20 +389,18 @@ export function createBureau(host) {
         extraction.meta = meta;
         retrieval.meta = meta;
         consolidation.meta = meta;
-        ctx.meta = meta;
 
         localVectors = localVectors || new LocalVectorStore(meta);
         if (!wal) {
             wal = new WriteAheadQueue(qdrant, localVectors, (down) => {
                 router.setQdrantDown(down);
-                desk?.refreshLedger(storageLedgerRows());
-                if (down) desk?.toast('STORAGE OFFLINE — local fallback engaged. Writes are queued.', 'err', 7000);
-                else desk?.toast('Qdrant reconnected — queued writes flushed.', 'ok');
+                desk?.refreshLedger?.(storageLedgerRows());
+                if (down) toast('STORAGE OFFLINE — local fallback engaged. Writes are queued.', 'error', "Mem's Memos", { timeOut: 7000 });
+                else toast('Qdrant reconnected — queued writes flushed.', 'success', "Mem's Memos");
             });
             extraction.wal = wal;
             retrieval.wal = wal;
             consolidation.wal = wal;
-            ctx.wal = wal;
         }
         await wal.reconcile();
 
@@ -419,28 +410,16 @@ export function createBureau(host) {
             const dim = embedCfg.dimensions || settings.state.embedDim || 0;
             if (dim > 0) {
                 try {
-                    const name = await qdrant.collectionFor({ model: embedCfg.model, dim })
-                        ? await ensureCollection(embedCfg.model, dim)
-                        : null;
-                    if (name) settings.state.collection = name;
+                    const name = qdrant.collectionFor({ model: embedCfg.model, dim });
+                    await wal.enqueue('ensure', name, { model: embedCfg.model, dim });
+                    settings.state.collection = name;
                 } catch (err) {
                     logger.warn('collection ensure failed', { err: String(err?.message || err) });
                 }
             }
         }
         checkModelGovernance();
-        desk?.refreshLedger(storageLedgerRows());
-    }
-
-    async function ensureCollection(model, dim) {
-        try {
-            const name = qdrant.collectionFor({ model, dim });
-            await wal.enqueue('ensure', name, { model, dim });
-            return name;
-        } catch (err) {
-            logger.warn('ensureCollection', { err: String(err?.message || err) });
-            return null;
-        }
+        desk?.refreshLedger?.(storageLedgerRows());
     }
 
     function storageLedgerRows() {
@@ -454,7 +433,6 @@ export function createBureau(host) {
         ];
     }
 
-    // --- governance ------------------------------------------------------------------
     function checkModelGovernance() {
         const embedCfg = settings.lanes.embed;
         const storedModel = settings.state.embedModel;
@@ -467,26 +445,25 @@ export function createBureau(host) {
         if (mismatch !== settings.state.modelMismatch) {
             settings.state.modelMismatch = mismatch;
             saveSettings();
-            if (mismatch) desk?.toast('MODEL MISMATCH — open Ledger → Embedding Governance.', 'err', 8000);
+            if (mismatch) toast('MODEL MISMATCH — open Ledger → Embedding Governance.', 'error', "Mem's Memos", { timeOut: 8000 });
         }
         if (!storedModel && embedCfg.model) {
             settings.state.embedModel = embedCfg.model;
             saveSettings();
         }
-        rooms.settings?.refresh?.();
+        rooms?.settings?.refresh?.();
     }
 
-    /** /mm reembed — background job: scroll all, re-embed, upsert, swap. */
     async function reembed({ mode = 'in-place' } = {}) {
         const embedCfg = settings.lanes.embed;
         if (!embedCfg.model) {
-            desk?.toast('Configure the embed lane first (Ledger → Model Lanes).', 'warn');
+            toast('Configure the embed lane first (Ledger → Model Lanes).', 'warning', "Mem's Memos");
             return;
         }
         const job = { total: 0, done: 0, status: 'running', startedAt: nowIso() };
         settings.state.reembedJob = job;
         saveSettings();
-        desk?.toast('Re-embed job started — progress in the Ledger.', '');
+        toast('Re-embed job started — progress in the Ledger.', 'info', "Mem's Memos");
         try {
             const dim = embedCfg.dimensions || settings.state.embedDim || 0;
             if (!dim) throw new Error('unknown embedding dim — TEST the embed lane first');
@@ -532,30 +509,30 @@ export function createBureau(host) {
             settings.state.modelMismatch = false;
             job.status = 'done';
             saveSettings();
-            desk?.toast(`Re-embedded ${job.done} memos into ${newCollection}.`, 'ok', 7000);
+            toast(`Re-embedded ${job.done} memos into ${newCollection}.`, 'success', "Mem's Memos", { timeOut: 7000 });
         } catch (err) {
             job.status = 'failed';
             job.error = String(err?.message || err);
             saveSettings();
-            desk?.toast(`Re-embed failed: ${job.error}`, 'err', 7000);
+            toast(`Re-embed failed: ${job.error}`, 'error', "Mem's Memos", { timeOut: 7000 });
         }
-        rooms.settings?.refresh?.();
+        rooms?.settings?.refresh?.();
     }
 
     async function retryFailedEmbeds() {
         const failed = await meta.queryMemories({ status: 'failed_embed' }).catch(() => []);
         if (!failed.length) {
-            desk?.toast('No failed embeds on file.', 'ok');
+            toast('No failed embeds on file.', 'success', "Mem's Memos");
             return;
         }
-        desk?.toast(`Retrying ${failed.length} failed embeds…`, '');
+        toast(`Retrying ${failed.length} failed embeds…`, 'info', "Mem's Memos");
         for (const m of failed) {
             await extraction._embedAndStore(m, { summaryVector: true });
         }
-        desk?.toast('Retry pass complete — check the Ledger.', 'ok');
+        toast('Retry pass complete — check the Ledger.', 'success', "Mem's Memos");
     }
 
-    // --- data management ----------------------------------------------------------------
+    // --- data management
     async function exportData() {
         const bundle = await meta.exportAll();
         const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
@@ -583,10 +560,10 @@ export function createBureau(host) {
         settings.state.modelMismatch = false;
         saveSettings();
         bus.emit('memory', { wiped: true });
-        for (const room of Object.values(rooms)) room.refresh?.();
+        for (const room of Object.values(rooms || {})) room?.refresh?.();
     }
 
-    // --- forgetting ----------------------------------------------------------------------
+    // --- forgetting
     async function forgetMemory(id) {
         await meta.updateMemory(id, { status: 'deleted', validity_status: 'deleted' });
         const rec = await meta.getMemory(id);
@@ -595,7 +572,6 @@ export function createBureau(host) {
         bus.emit('memory', { forgotten: id });
     }
 
-    /** /mm forget last | chat | character <name> | entity <name> */
     async function forget(target) {
         const scope = getScope();
         const t = String(target || '').trim();
@@ -633,14 +609,13 @@ export function createBureau(host) {
         return 'Usage: /mm forget last | chat | character <name> | entity <name>';
     }
 
-    // --- reports (slash + desk) ------------------------------------------------------------
+    // --- reports
     function setMode(mode) {
         if (!['on', 'shadow', 'off'].includes(mode)) return `Unknown mode ${mode}`;
         settings.mode = mode;
         saveSettings();
-        desk.setMode(mode);
-        desk.refreshLedger(storageLedgerRows());
-        if (mode !== 'on') host.clearInjection?.();
+        desk?.setMode?.(mode);
+        desk?.refreshLedger?.(storageLedgerRows());
         return `Bureau mode: ${mode.toUpperCase()}`;
     }
 
@@ -663,7 +638,6 @@ export function createBureau(host) {
         const result = await retrieval.retrieve({
             query, chatId: scope.chatId, characterName: scope.characterName, characterId: scope.characterId,
         });
-        desk._activate('reading');
         if (!result.memories.length) return 'Nothing filed under that name.';
         return result.memories
             .map((m, i) => `${i + 1}. [${m.finalScore.toFixed(3)}] ${truncateWords(m.displayText, 140)}`)
@@ -700,7 +674,7 @@ export function createBureau(host) {
         const rec = await meta.getMemory(String(id || '').trim());
         if (!rec) return `No memo filed under id ${id}`;
         const audit = await meta.auditFor(rec.id).catch(() => []);
-        const lines = [
+        return [
             `TRACE ${rec.id}`,
             `type ${rec.memory_type} · status ${rec.status} · validity ${rec.validity_status}`,
             `importance ${Number(rec.importance ?? 0.5).toFixed(2)} · strength ${Number(rec.strength ?? 1).toFixed(2)} · recalls ${rec.recall_count || 0}`,
@@ -708,54 +682,19 @@ export function createBureau(host) {
             `vector ${rec.vector_collection || 'none'} · ${rec.embedding_model || 'no model'} ${rec.embedding_dim || ''}d`,
             `knowers [${(rec.knowers_json || []).join(', ')}] secret_from [${(rec.secret_from_json || []).join(', ')}]`,
             ...audit.map((a) => `${a.created_at} ${a.action}: ${truncateWords(JSON.stringify(a.detail || {}), 120)}`),
-        ];
-        showTraceCard(rec, audit);
-        return lines.join('\n');
-    }
-
-    function showTrace(id) {
-        traceReport(id).catch((err) => desk.toast(String(err?.message || err), 'err'));
-    }
-
-    function showTraceCard(rec, audit) {
-        desk._activate('reading');
-        const hostEl = desk.roomEl('reading');
-        if (!hostEl) return;
-        const room = rooms.reading;
-        room.pipelineEl?.replaceChildren(
-            ...[
-                { stage: 'id', detail: rec.id },
-                { stage: 'created', detail: rec.created_at },
-                { stage: 'extractor', detail: rec.extractor_model || '—' },
-                { stage: 'vector', detail: rec.vector_collection || '—' },
-                ...audit.map((a) => ({ stage: a.action, detail: truncateWords(JSON.stringify(a.detail || {}), 90) })),
-            ].map((t) => {
-                const row = document.createElement('div');
-                row.className = 'mm-ledger-row';
-                const k = document.createElement('span');
-                k.className = 'mm-ledger-key';
-                k.textContent = t.stage;
-                const lead = document.createElement('span');
-                lead.className = 'mm-ledger-leader';
-                const v = document.createElement('span');
-                v.className = 'mm-ledger-val';
-                v.textContent = t.detail;
-                row.append(k, lead, v);
-                return row;
-            }),
-        );
+        ].join('\n');
     }
 
     function showLastTrace() {
         const trace = injection.getLastTrace();
         if (!trace?.length) {
-            desk.toast('No recall has run yet — search in RECALL first.', 'warn');
+            toast('No recall has run yet — search in RECALL first.', 'warning', "Mem's Memos");
             return;
         }
-        desk._activate('reading');
+        desk?._activate?.('reading');
     }
 
-    // --- eval harness (T12) -----------------------------------------------------------------
+    // --- eval harness
     async function runEval() {
         const scope = getScope();
         const all = await meta.queryMemories({ chat_id: scope.chatId, status: 'active' }).catch(() => []);
@@ -792,25 +731,28 @@ export function createBureau(host) {
         };
         settings.state.evalHistory = [...(settings.state.evalHistory || []), receipt].slice(-10);
         saveSettings();
-        desk.toast(
+        toast(
             golden.length
                 ? `EVAL recall@${k} ${(receipt.recallAtK * 100).toFixed(0)}% · MRR ${receipt.mrr.toFixed(2)} · contradictions ${(receipt.contradictionRate * 100).toFixed(1)}%`
                 : 'EVAL: no golden-tagged memos (tag memories with "golden" to build the set).',
-            golden.length ? 'ok' : 'warn', 7000,
+            golden.length ? 'success' : 'warning', "Mem's Memos", { timeOut: 7000 },
         );
         return JSON.stringify(receipt, null, 2);
     }
 
-    // --- msgdots -------------------------------------------------------------------------------
+    // --- msgdots
+    const stmDots = new Set();
+    const ltmDots = new Set();
+    const recallDots = new Set();
+
     function refreshMsgDots() {
-        if (!settings.ui.msgDots || !scopeChatId()) {
-            desk.detachMsgDots();
+        if (!settings.ui.msgDots || !getScope().chatId) {
+            desk?.detachMsgDots?.();
             return;
         }
         const container = host.chatContainer?.();
         if (!container) return;
-        const chatId = scopeChatId();
-        desk.attachMsgDots({
+        desk?.attachMsgDots?.({
             container,
             selector: host.messageSelector(),
             dotsFor: (node) => {
@@ -824,18 +766,11 @@ export function createBureau(host) {
             },
         });
     }
-    const stmDots = new Set();
-    const ltmDots = new Set();
-    const recallDots = new Set();
-    function scopeChatId() {
-        return getScope().chatId;
-    }
 
-    // --- message + generation wiring -----------------------------------------------------------
+    // --- message + generation wiring
     const unsubscribers = [];
 
     function wireEvents() {
-        // ingestion (T1) — async, never blocks generation
         const onMessage = (isUser) => (data) => {
             try {
                 if (!ctx.isChatEnabled()) return;
@@ -868,52 +803,21 @@ export function createBureau(host) {
         unsubscribers.push(host.on('MESSAGE_SENT', onMessage(true)));
         unsubscribers.push(host.on('MESSAGE_RECEIVED', onMessage(false)));
 
-        // retrieval + injection BEFORE generation leaves — awaited but guarded
-        // by a hard timeout so chat NEVER stalls on the bureau.
-        unsubscribers.push(host.on('GENERATION_STARTED', async () => {
-            try {
-                if (!ctx.isChatEnabled()) return;
-                const scope = getScope();
-                if (!scope.chatId) return;
-                const query = host.getLastUserMessage() || '';
-                if (!shouldRetrieve(query)) return;
-                const work = injection.inject(host, {
-                    query,
-                    chatId: scope.chatId,
-                    characterName: scope.characterName,
-                    characterId: scope.characterId,
-                });
-                const timeout = new Promise((resolve) =>
-                    setTimeout(() => resolve({ injected: false, reason: 'timeout' }), 3500),
-                );
-                const result = await Promise.race([work, timeout]);
-                if (result?.block) {
-                    for (const m of result.block.trace ?? []) {
-                        if (m.stage === 'done') break;
-                    }
-                    recallDots.add(String((host.getRecentMessages(1).length || 0)));
-                    bus.emit('recall', result.block);
-                }
-            } catch (err) {
-                logger.warn('generation-time recall failed', { err: String(err?.message || err) });
-            }
-        }));
-
         unsubscribers.push(host.on('CHAT_CHANGED', async () => {
-            desk.detachMsgDots();
+            desk?.detachMsgDots?.();
             stm.clearWindow();
             stmDots.clear();
             ltmDots.clear();
             recallDots.clear();
-            desk.refreshLetterhead();
-            for (const room of Object.values(rooms)) room.refresh?.();
+            desk?.refreshLetterhead?.();
+            for (const room of Object.values(rooms || {})) room?.refresh?.();
             if (settings.governance.autoConsolidateOnChatChange) {
                 consolidation.sleep(getScope().chatId).catch((err) => logger.warn('sleep on chat change failed', { err: String(err?.message || err) }));
             }
         }));
     }
 
-    // --- drawer ------------------------------------------------------------------------
+    // --- drawer
     let drawerOpen = false;
     function toggleDrawer(force) {
         const hostEl = host.drawerHost();
@@ -921,7 +825,6 @@ export function createBureau(host) {
         hostEl.classList.toggle('mm-hidden', !drawerOpen);
         if (drawerOpen) {
             if (!hostEl.dataset.mounted && hostEl.isConnected !== false) {
-
                 hostEl.dataset.mounted = '1';
                 desk.mount(hostEl);
                 applyDrawerWidth(hostEl, settings.ui.drawerWidth);
@@ -946,7 +849,7 @@ export function createBureau(host) {
             const w = startW + (startX - e.clientX);
             applyDrawerWidth(hostEl, w);
         };
-        const onUp = (e) => {
+        const onUp = () => {
             document.removeEventListener('mousemove', onMove);
             document.removeEventListener('mouseup', onUp);
             settings.ui.drawerWidth = hostEl.getBoundingClientRect().width;
@@ -961,7 +864,7 @@ export function createBureau(host) {
         });
     }
 
-    // --- idle consolidation -----------------------------------------------------------------
+    // --- idle consolidation
     let idleTimer = null;
     function armIdleConsolidation() {
         const minutes = settings.governance.idleConsolidateMinutes;
@@ -975,8 +878,7 @@ export function createBureau(host) {
         }, 60_000);
     }
 
-    /** TEST-ONLY: swap the metadata store + WAL to in-memory doubles so the
-     *  full bureau can boot under plain Node (no indexedDB). */
+    /** TEST-ONLY */
     async function _testWireMeta(metaStore, vectorStore) {
         meta = metaStore;
         stm.meta = meta;
@@ -1004,120 +906,16 @@ export function createBureau(host) {
         consolidation.wal = wal;
     }
 
-    // --- extensions tab panel (inline-drawer, like other ST extensions) -----------
-    async function updateExtPanelStatus() {
-        const el = document.getElementById('mm-ext-status');
-        if (!el) return;
-        const scope = getScope();
-        const counts = meta ? await meta.countMemories({ chat_id: scope.chatId }).catch(() => 0) : 0;
-        el.textContent = `mode ${settings.mode.toUpperCase()} · ${wal?.usingFallback ? 'local fallback' : 'qdrant'} · L${router.degradationLevel()} · ${counts} memos`;
-    }
-
-    function mountExtensionsPanel() {
-        const id = 'mm-ext-panel';
-        if (document.getElementById(id)) return updateExtPanelStatus();
-        const findCol = () => document.querySelector('#extensions_settings2')
-            || document.querySelector('#extensions_settings')
-            || document.querySelector('#extensions_settings_block')
-            || document.querySelector('.extensions_settings');
-        const build = (col) => {
-            const panel = document.createElement('div');
-            panel.id = id;
-            panel.className = 'mems-memos-settings';
-        const drawer = document.createElement('div');
-        drawer.className = 'inline-drawer';
-
-        const head = document.createElement('div');
-        head.className = 'inline-drawer-toggle inline-drawer-header';
-        const title = document.createElement('b');
-        title.textContent = "Mem's Memos";
-        const chevron = document.createElement('div');
-        chevron.className = 'inline-drawer-icon fa-solid fa-circle-chevron-down down';
-        head.append(title, chevron);
-
-        const content = document.createElement('div');
-        content.className = 'inline-drawer-content';
-        content.style.display = 'none';
-        head.addEventListener('click', () => {
-            const open = content.style.display !== 'none';
-            content.style.display = open ? 'none' : '';
-            chevron.classList.toggle('down', open);
-            chevron.classList.toggle('up', !open);
-            if (!open) updateExtPanelStatus();
-        });
-
-        const status = document.createElement('div');
-        status.id = 'mm-ext-status';
-        status.className = 'text_margins';
-        status.style.cssText = 'font-family:monospace;font-size:11px;opacity:.75;margin:6px 0;';
-
-        const openBtn = document.createElement('div');
-        openBtn.className = 'menu_button menu_button_icon';
-        openBtn.textContent = "Open the Archivist's Desk";
-        openBtn.addEventListener('click', () => toggleDrawer(true));
-
-        const modeRow = document.createElement('div');
-        modeRow.style.cssText = 'display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;';
-        const modeBtns = [];
-        for (const [label, value] of [['ACTIVE', 'on'], ['SHADOW', 'shadow'], ['OFF', 'off']]) {
-            const b = document.createElement('div');
-            b.className = 'menu_button menu_button_icon';
-            b.textContent = label;
-            b.dataset.mode = value;
-            b.addEventListener('click', () => {
-                setMode(value);
-                markModeButtons();
-                updateExtPanelStatus();
-            });
-            modeRow.append(b);
-            modeBtns.push(b);
-        }
-        const markModeButtons = () => {
-            for (const b of modeBtns) {
-                b.style.outline = b.dataset.mode === settings.mode ? '1px solid #d99a2b' : '';
-            }
-        };
-        markModeButtons();
-
-        const note = document.createElement('div');
-        note.className = 'text_margins';
-        note.style.cssText = 'font-size:11px;opacity:.6;margin-top:8px;';
-        note.textContent = 'Full configuration lives in the Desk → LEDGER tab. First run is SHADOW: memories are stored, nothing is injected.';
-
-        content.append(status, openBtn, modeRow, note);
-        drawer.append(head, content);
-        panel.append(drawer);
-        col.appendChild(panel);
-        updateExtPanelStatus();
-        };
-        let hostCol = findCol();
-        if (!hostCol) {
-            // ST injects the extensions column after init; poll a few times.
-            let tries = 0;
-            const retry = () => {
-                if (document.getElementById(id)) return;
-                hostCol = findCol();
-                if (hostCol) return build(hostCol);
-                if (++tries < 40) setTimeout(retry, 250);
-            };
-            return setTimeout(retry, 250);
-        }
-        return build(hostCol);
-    }
-
-    // --- boot -------------------------------------------------------------------------------
+    // --- boot
     async function start() {
         if (!meta) await rebuildStorage();
         wireEvents();
         host.mountLauncher(() => toggleDrawer());
-        mountExtensionsPanel();
         registerSlashCommands(ctx, host);
         armIdleConsolidation();
-        desk.refreshLedger(storageLedgerRows());
-        updateExtPanelStatus();
+        desk?.refreshLedger?.(storageLedgerRows());
         logger.info('bureau open', { host: host.kind, mode: settings.mode });
         if (host.kind === 'mock') {
-            // seed a couple of messages so the desk is visibly alive in dev
             setTimeout(() => {
                 host.emit('MESSAGE_SENT', { messageId: 0, message: 'The Archivist opened the bureau ledger.' });
                 host.chat.push({ name: 'user', text: 'The Archivist opened the bureau ledger.', isUser: true });
@@ -1129,77 +927,180 @@ export function createBureau(host) {
         unsubscribers.forEach((u) => { try { u?.(); } catch { /* ignore */ } });
         unsubscribers.length = 0;
         clearInterval(idleTimer);
-        desk.unmount();
+        desk?.unmount?.();
         document.getElementById('mm-launcher')?.remove();
         document.getElementById('mm-drawer-host')?.remove();
-        document.getElementById('mm-ext-panel')?.remove();
-        host.clearInjection?.();
     }
 
-    return Object.assign(ctx, { start, stop, toggleDrawer, storageLedgerRows, _testWireMeta });
+    return Object.assign(ctx, { start, stop, toggleDrawer, storageLedgerRows, _testWireMeta, getScope, settings });
 }
 
 // ---------------------------------------------------------------------------
-// LIFECYCLE HOOKS (manifest maps to these globals)
+// GENERATION INTERCEPTOR — depth-sliced memory injection via chat.splice
 // ---------------------------------------------------------------------------
-
-let activated = false;
-
-export async function mmOnInstall() {
-    console.log("[Mem's Memos] installed — the bureau takes its seat.");
-}
-
-export async function mmOnUpdate() {
-    console.log("[Mem's Memos] updated — settings merge on next activation.");
-}
-
-export async function mmOnDelete() {
+globalThis.mmInterceptor = async function (chat, contextSize, abort, type) {
+    if (!bureau) return;
     try {
-        const host = createHost();
-        host.setSettings?.(null);
-    } catch { /* best effort */ }
-    console.log("[Mem's Memos] removed — the desk is cleared.");
-}
+        const scope = bureau.getScope();
+        if (!scope.chatId) return;
+        if (!bureau.isChatEnabled()) return;
+        if (bureau.settings.mode === 'off' || bureau.settings.governance.killSwitch) return;
 
-export async function mmOnEnable() {
-    if (bureau) await mmOnActivate();
-}
+        const query = bureau.host.getLastUserMessage() || '';
+        if (!shouldRetrieve(query)) return;
 
-export async function mmOnDisable() {
-    if (bureau) {
-        bureau.stop();
-        bureau = null;
-        activated = false;
-    }
-}
-
-export async function mmOnActivate() {
-    if (activated) return;
-    activated = true;
-    try {
-        const host = createHost();
-        bureau = createBureau(host);
-        await bureau.start();
-    } catch (err) {
-        // absolute fail-safe: the extension must never break ST load
-        console.error("[Mem's Memos] activation failed — bureau disabled", err);
-        activated = false;
-    }
-}
-
-// ST's loader resolves hook names as globals on window
-Object.assign(globalThis, {
-    mmOnInstall, mmOnUpdate, mmOnDelete, mmOnEnable, mmOnDisable, mmOnActivate,
-});
-
-// legacy (pre-1.17) self-init fallback
-if (typeof globalThis.jQuery === 'function' && !('hooks' in (globalThis.__mmManifest || {}))) {
-    try {
-        globalThis.jQuery(async () => {
-            await new Promise((r) => setTimeout(r, 50));
-            await mmOnActivate();
+        // Build the block (retrieval + states + epistemic filter)
+        const block = await bureau.injection.buildBlock({
+            query,
+            chatId: scope.chatId,
+            characterName: scope.characterName,
+            characterId: scope.characterId,
         });
-    } catch { /* hooks path will handle it on 1.17+ */ }
+
+        if (bureau.settings.mode === 'shadow') {
+            bureau.injection.lastBlock = block;
+            return; // shadow: store but never inject
+        }
+
+        // Depth slicing: insert N messages from the end (Author's Note convention)
+        const depth = Math.max(0, block.depth ?? bureau.settings.pipeline.injectionDepth);
+        const memoryEntry = {
+            name: 'System',
+            is_user: false,
+            is_system: true,
+            mes: block.text,
+            send_date: Date.now(),
+        };
+        const insertIndex = Math.max(0, chat.length - depth);
+        chat.splice(insertIndex, 0, memoryEntry);
+
+        bureau.injection.lastBlock = block;
+        if (bureau.settings.governance.auditTrail) {
+            bureau.meta?.audit?.({
+                memory_id: null,
+                action: 'injected',
+                detail: { depth, tokens: block.tokens, memoryCount: block.memoryCount },
+            }).catch(() => {});
+        }
+    } catch (err) {
+        logger.warn('mmInterceptor failed — generation unaffected', { err: String(err?.message || err) });
+    }
+};
+
+// ---------------------------------------------------------------------------
+// SETTINGS UI — appended to #extensions_settings2
+// ---------------------------------------------------------------------------
+function createSettingsUI(bureau) {
+    const $ = globalThis.$;
+    if (!$) return;
+    const settings = bureau.getSettings();
+    const scope = bureau.getScope();
+
+    const modeBtn = (label, value) => `
+        <div class="menu_button menu_button_icon mm-mode-btn ${settings.mode === value ? 'mm-active-mode' : ''}"
+             data-mode="${value}" style="${settings.mode === value ? 'outline:1px solid #d99a2b' : ''}">
+            ${label}
+        </div>`;
+
+    const html = `
+        <div class="mems-memos-settings">
+            <div class="inline-drawer">
+                <div class="inline-drawer-toggle inline-drawer-header">
+                    <b>Mem's Memos</b>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                </div>
+                <div class="inline-drawer-content">
+                    <div id="mm-ext-status" class="text_margins" style="font-family:monospace;font-size:11px;opacity:.75;margin:6px 0;">
+                        mode ${settings.mode.toUpperCase()} · ${bureau.wal?.usingFallback ? 'local fallback' : 'qdrant'} · L${bureau.router.degradationLevel()}
+                    </div>
+                    <div id="mm-open-desk" class="menu_button menu_button_icon">
+                        Open the Archivist's Desk
+                    </div>
+                    <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">
+                        ${modeBtn('ACTIVE', 'on')}
+                        ${modeBtn('SHADOW', 'shadow')}
+                        ${modeBtn('OFF', 'off')}
+                    </div>
+                    <div class="text_margins" style="font-size:11px;opacity:.6;margin-top:8px;">
+                        Full configuration lives in the Desk → LEDGER tab.
+                        First run is SHADOW: memories are stored, nothing is injected.
+                        <br>Desk of: ${scope.characterName || '—'} · File №${scope.chatName || scope.chatId || '—'}
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+
+    const hostCol = document.querySelector('#extensions_settings2')
+        || document.querySelector('#extensions_settings');
+    if (!hostCol) return;
+    hostCol.insertAdjacentHTML('beforeend', html);
+
+    if (typeof globalThis.applyInlineDrawerListeners === 'function') {
+        globalThis.applyInlineDrawerListeners();
+    }
+
+    $('#mm-open-desk').on('click', () => bureau.toggleDrawer(true));
+
+    hostCol.querySelectorAll('.mm-mode-btn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            bureau.setMode(btn.dataset.mode);
+            hostCol.querySelectorAll('.mm-mode-btn').forEach((b) => {
+                b.style.outline = b.dataset.mode === bureau.getSettings().mode ? '1px solid #d99a2b' : '';
+            });
+            const statusEl = hostCol.querySelector('#mm-ext-status');
+            if (statusEl) {
+                statusEl.textContent = `mode ${bureau.getSettings().mode.toUpperCase()} · ${bureau.wal?.usingFallback ? 'local fallback' : 'qdrant'} · L${bureau.router.degradationLevel()}`;
+            }
+        });
+    });
+}
+
+// ---------------------------------------------------------------------------
+// INIT — jQuery-ready pattern (proven by st-qdrant-memory et al)
+// ---------------------------------------------------------------------------
+function mmInit() {
+    if (bureau) return; // idempotent
+
+    const st = getCtx();
+    const hostInstance = st ? new StHost() : new MockHost();
+
+    try {
+        bureau = createBureau(hostInstance);
+    } catch (err) {
+        console.error("[Mem's Memos] bureau creation failed", err);
+        toast('Bureau creation failed — see console.', 'error', "Mem's Memos", { timeOut: 10000 });
+        return;
+    }
+
+    bureau.start().then(() => {
+        createSettingsUI(bureau);
+        toast(
+            `Bureau open — mode ${bureau.getSettings().mode.toUpperCase()}. Click the stamp icon to open the Desk.`,
+            'success',
+            "Mem's Memos",
+            { timeOut: 5000 },
+        );
+    }).catch((err) => {
+        console.error("[Mem's Memos] bureau start failed", err);
+        toast('Bureau start failed — see console.', 'error', "Mem's Memos", { timeOut: 10000 });
+    });
+}
+
+// Primary init path: jQuery ready (fires immediately if DOM is already ready)
+if (typeof globalThis.jQuery === 'function') {
+    globalThis.jQuery(async () => {
+        // Small delay to let ST's own init finish
+        await new Promise((r) => setTimeout(r, 100));
+        mmInit();
+    });
+} else {
+    // No jQuery — try DOMContentLoaded
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => setTimeout(mmInit, 200));
+    } else {
+        setTimeout(mmInit, 200);
+    }
 }
 
 function percentile(arr, p) {
