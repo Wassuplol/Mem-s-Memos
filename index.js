@@ -1016,14 +1016,14 @@ export function createBureau(host) {
     function mountExtensionsPanel() {
         const id = 'mm-ext-panel';
         if (document.getElementById(id)) return updateExtPanelStatus();
-        const hostCol = document.querySelector('#extensions_settings2')
-            || document.querySelector('#extensions_settings');
-        if (!hostCol) return;
-
-        const panel = document.createElement('div');
-        panel.id = id;
-        panel.className = 'mems-memos-settings';
-
+        const findCol = () => document.querySelector('#extensions_settings2')
+            || document.querySelector('#extensions_settings')
+            || document.querySelector('#extensions_settings_block')
+            || document.querySelector('.extensions_settings');
+        const build = (col) => {
+            const panel = document.createElement('div');
+            panel.id = id;
+            panel.className = 'mems-memos-settings';
         const drawer = document.createElement('div');
         drawer.className = 'inline-drawer';
 
@@ -1058,6 +1058,7 @@ export function createBureau(host) {
 
         const modeRow = document.createElement('div');
         modeRow.style.cssText = 'display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;';
+        const modeBtns = [];
         for (const [label, value] of [['ACTIVE', 'on'], ['SHADOW', 'shadow'], ['OFF', 'off']]) {
             const b = document.createElement('div');
             b.className = 'menu_button menu_button_icon';
@@ -1069,9 +1070,10 @@ export function createBureau(host) {
                 updateExtPanelStatus();
             });
             modeRow.append(b);
+            modeBtns.push(b);
         }
         const markModeButtons = () => {
-            for (const b of modeRow.children) {
+            for (const b of modeBtns) {
                 b.style.outline = b.dataset.mode === settings.mode ? '1px solid #d99a2b' : '';
             }
         };
@@ -1085,8 +1087,22 @@ export function createBureau(host) {
         content.append(status, openBtn, modeRow, note);
         drawer.append(head, content);
         panel.append(drawer);
-        hostCol.appendChild(panel);
+        col.appendChild(panel);
         updateExtPanelStatus();
+        };
+        let hostCol = findCol();
+        if (!hostCol) {
+            // ST injects the extensions column after init; poll a few times.
+            let tries = 0;
+            const retry = () => {
+                if (document.getElementById(id)) return;
+                hostCol = findCol();
+                if (hostCol) return build(hostCol);
+                if (++tries < 40) setTimeout(retry, 250);
+            };
+            return setTimeout(retry, 250);
+        }
+        return build(hostCol);
     }
 
     // --- boot -------------------------------------------------------------------------------

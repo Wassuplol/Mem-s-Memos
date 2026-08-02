@@ -7,7 +7,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "Mem's Memos Bureau",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "homePage": "https://github.com/Wassuplol/Mem-s-Memos",
     "auto_update": false,
     "minimum_client_version": "1.12.0",
