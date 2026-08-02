@@ -142,32 +142,31 @@ class StHost {
         return all.indexOf(node);
     }
 
-    /** Mount point for the drawer launcher (ST extensions menu / wand area). */
+    /** Mount point for the drawer launcher — ST-conventional extensions menu
+     *  item (puzzle dropdown), with floating fallback. */
     mountLauncher(onClick) {
         const id = 'mm-launcher';
         if (document.getElementById(id)) return document.getElementById(id);
+        const menu = document.querySelector('#extensionsMenu') || document.querySelector('#extensions-menu');
         const btn = document.createElement('div');
         btn.id = id;
-        btn.className = 'mm-launcher-btn';
         btn.setAttribute('role', 'button');
         btn.setAttribute('tabindex', '0');
         btn.setAttribute('aria-label', "Open Mem's Memos");
-        btn.innerHTML = '<i class="fa-solid fa-stamp" aria-hidden="true"></i><span>Memos</span>';
-        btn.addEventListener('click', onClick);
-        btn.addEventListener('keydown', (e) => { if (e.key === 'Enter') onClick(); });
-        const targets = [
-            document.querySelector('#extensionsMenu'),
-            document.querySelector('#extensions-menu'),
-            document.querySelector('#rm_extensions_panel'),
-            document.querySelector('#top-settings-holder'),
-        ].filter(Boolean);
-        if (targets.length) {
-            targets[0].appendChild(btn);
+        btn.setAttribute('title', "Mem's Memos — open the Archivist's Desk");
+        if (menu) {
+            // match ST's list-group-item menu rows used by other extensions
+            btn.className = 'list-group-item flex-container flexGap5 interactable';
+            btn.innerHTML = '<i class="fa-solid fa-stamp extensionsMenuExtensionButton" aria-hidden="true"></i><span>Mem\'s Memos</span>';
+            menu.appendChild(btn);
         } else {
-            // fixed floating fallback — never blocks the loader
+            btn.className = 'mm-launcher-btn';
+            btn.innerHTML = '<i class="fa-solid fa-stamp" aria-hidden="true"></i><span>Memos</span>';
             btn.style.cssText = 'position:fixed;right:10px;bottom:46px;z-index:2999;background:#262019;color:#f2e8d3;border:1px solid #3a3125;border-radius:6px;padding:6px 10px;cursor:pointer;font:12px monospace;display:flex;gap:6px;align-items:center;';
             document.body.appendChild(btn);
         }
+        btn.addEventListener('click', onClick);
+        btn.addEventListener('keydown', (e) => { if (e.key === 'Enter') onClick(); });
         return btn;
     }
 
@@ -1005,14 +1004,101 @@ export function createBureau(host) {
         consolidation.wal = wal;
     }
 
+    // --- extensions tab panel (inline-drawer, like other ST extensions) -----------
+    async function updateExtPanelStatus() {
+        const el = document.getElementById('mm-ext-status');
+        if (!el) return;
+        const scope = getScope();
+        const counts = meta ? await meta.countMemories({ chat_id: scope.chatId }).catch(() => 0) : 0;
+        el.textContent = `mode ${settings.mode.toUpperCase()} · ${wal?.usingFallback ? 'local fallback' : 'qdrant'} · L${router.degradationLevel()} · ${counts} memos`;
+    }
+
+    function mountExtensionsPanel() {
+        const id = 'mm-ext-panel';
+        if (document.getElementById(id)) return updateExtPanelStatus();
+        const hostCol = document.querySelector('#extensions_settings2')
+            || document.querySelector('#extensions_settings');
+        if (!hostCol) return;
+
+        const panel = document.createElement('div');
+        panel.id = id;
+        panel.className = 'mems-memos-settings';
+
+        const drawer = document.createElement('div');
+        drawer.className = 'inline-drawer';
+
+        const head = document.createElement('div');
+        head.className = 'inline-drawer-toggle inline-drawer-header';
+        const title = document.createElement('b');
+        title.textContent = "Mem's Memos";
+        const chevron = document.createElement('div');
+        chevron.className = 'inline-drawer-icon fa-solid fa-circle-chevron-down down';
+        head.append(title, chevron);
+
+        const content = document.createElement('div');
+        content.className = 'inline-drawer-content';
+        content.style.display = 'none';
+        head.addEventListener('click', () => {
+            const open = content.style.display !== 'none';
+            content.style.display = open ? 'none' : '';
+            chevron.classList.toggle('down', open);
+            chevron.classList.toggle('up', !open);
+            if (!open) updateExtPanelStatus();
+        });
+
+        const status = document.createElement('div');
+        status.id = 'mm-ext-status';
+        status.className = 'text_margins';
+        status.style.cssText = 'font-family:monospace;font-size:11px;opacity:.75;margin:6px 0;';
+
+        const openBtn = document.createElement('div');
+        openBtn.className = 'menu_button menu_button_icon';
+        openBtn.textContent = "Open the Archivist's Desk";
+        openBtn.addEventListener('click', () => toggleDrawer(true));
+
+        const modeRow = document.createElement('div');
+        modeRow.style.cssText = 'display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;';
+        for (const [label, value] of [['ACTIVE', 'on'], ['SHADOW', 'shadow'], ['OFF', 'off']]) {
+            const b = document.createElement('div');
+            b.className = 'menu_button menu_button_icon';
+            b.textContent = label;
+            b.dataset.mode = value;
+            b.addEventListener('click', () => {
+                setMode(value);
+                markModeButtons();
+                updateExtPanelStatus();
+            });
+            modeRow.append(b);
+        }
+        const markModeButtons = () => {
+            for (const b of modeRow.children) {
+                b.style.outline = b.dataset.mode === settings.mode ? '1px solid #d99a2b' : '';
+            }
+        };
+        markModeButtons();
+
+        const note = document.createElement('div');
+        note.className = 'text_margins';
+        note.style.cssText = 'font-size:11px;opacity:.6;margin-top:8px;';
+        note.textContent = 'Full configuration lives in the Desk → LEDGER tab. First run is SHADOW: memories are stored, nothing is injected.';
+
+        content.append(status, openBtn, modeRow, note);
+        drawer.append(head, content);
+        panel.append(drawer);
+        hostCol.appendChild(panel);
+        updateExtPanelStatus();
+    }
+
     // --- boot -------------------------------------------------------------------------------
     async function start() {
         if (!meta) await rebuildStorage();
         wireEvents();
         host.mountLauncher(() => toggleDrawer());
+        mountExtensionsPanel();
         registerSlashCommands(ctx, host);
         armIdleConsolidation();
         desk.refreshLedger(storageLedgerRows());
+        updateExtPanelStatus();
         logger.info('bureau open', { host: host.kind, mode: settings.mode });
         if (host.kind === 'mock') {
             // seed a couple of messages so the desk is visibly alive in dev
@@ -1030,6 +1116,7 @@ export function createBureau(host) {
         desk.unmount();
         document.getElementById('mm-launcher')?.remove();
         document.getElementById('mm-drawer-host')?.remove();
+        document.getElementById('mm-ext-panel')?.remove();
         host.clearInjection?.();
     }
 
