@@ -803,7 +803,7 @@ export function createBureau(hostInstance) {
         unsubscribers.push(host.on('MESSAGE_SENT', onMessage(true)));
         unsubscribers.push(host.on('MESSAGE_RECEIVED', onMessage(false)));
 
-        unsubscribers.push(host.on('CHAT_CHANGED', async () => {
+        const onScopeChanged = async () => {
             desk?.detachMsgDots?.();
             stm.clearWindow();
             stmDots.clear();
@@ -811,58 +811,134 @@ export function createBureau(hostInstance) {
             recallDots.clear();
             desk?.refreshLetterhead?.();
             for (const room of Object.values(rooms || {})) room?.refresh?.();
+        };
+        unsubscribers.push(host.on('CHAT_CHANGED', async () => {
+            await onScopeChanged();
             if (settings.governance.autoConsolidateOnChatChange) {
                 consolidation.sleep(getScope().chatId).catch((err) => logger.warn('sleep on chat change failed', { err: String(err?.message || err) }));
             }
         }));
+        unsubscribers.push(host.on('CHARACTER_CHANGED', onScopeChanged));
+        unsubscribers.push(host.on('CHAT_LOADED', onScopeChanged));
+        unsubscribers.push(host.on('PERSONA_CHANGED', onScopeChanged));
     }
 
-    // --- drawer
+    // --- modal desk (centered overlay, megumin-style) -----------------------------
     let drawerOpen = false;
+    let modalPanel = null;
+    let uiRefreshTimer = null;
+
     function toggleDrawer(force) {
         const hostEl = host.drawerHost();
         drawerOpen = typeof force === 'boolean' ? force : !drawerOpen;
-        hostEl.classList.toggle('mm-hidden', !drawerOpen);
         if (drawerOpen) {
+            hostEl.classList.remove('mm-hidden');
             if (!hostEl.dataset.mounted && hostEl.isConnected !== false) {
                 hostEl.dataset.mounted = '1';
-                desk.mount(hostEl);
-                applyDrawerWidth(hostEl, settings.ui.drawerWidth);
-                makeResizable(hostEl);
+                const backdrop = document.createElement('div');
+                backdrop.className = 'mm-modal-backdrop';
+                backdrop.addEventListener('click', () => toggleDrawer(false));
+                hostEl.appendChild(backdrop);
+
+                modalPanel = document.createElement('div');
+                modalPanel.className = 'mm-modal-panel';
+                applyDrawerWidth(modalPanel, settings.ui.drawerWidth);
+                hostEl.appendChild(modalPanel);
+
+                desk.mount(modalPanel);
+                makeResizable(modalPanel);
+                makeDraggable(modalPanel, modalPanel.querySelector('.mm-letterhead'));
             }
             desk.refreshLetterhead();
             desk.refreshLedger(storageLedgerRows());
+            refreshActiveRoom();
+            armUiRefresh();
+        } else {
+            hostEl.classList.add('mm-hidden');
+            disarmUiRefresh();
         }
     }
 
-    function applyDrawerWidth(hostEl, w) {
-        hostEl.style.width = `${Math.min(720, Math.max(380, w || 480))}px`;
+    function refreshActiveRoom() {
+        const active = desk?.activeTab;
+        if (active && rooms?.[active]?.refresh) rooms[active].refresh();
     }
 
-    function makeResizable(hostEl) {
+    function armUiRefresh() {
+        clearInterval(uiRefreshTimer);
+        uiRefreshTimer = setInterval(() => {
+            if (!drawerOpen) return disarmUiRefresh();
+            desk?.refreshLetterhead?.();
+            refreshActiveRoom();
+        }, 4000);
+    }
+    function disarmUiRefresh() {
+        clearInterval(uiRefreshTimer);
+        uiRefreshTimer = null;
+    }
+
+    function applyDrawerWidth(panel, w) {
+        panel.style.width = `${Math.min(1100, Math.max(420, w || 920))}px`;
+    }
+
+    function makeResizable(panel) {
         const grip = document.createElement('div');
         grip.className = 'mm-resizer';
-        hostEl.appendChild(grip);
+        grip.setAttribute('aria-hidden', 'true');
+        panel.appendChild(grip);
         let startX = 0;
         let startW = 0;
         const onMove = (e) => {
             const w = startW + (startX - e.clientX);
-            applyDrawerWidth(hostEl, w);
+            applyDrawerWidth(panel, w);
         };
         const onUp = () => {
             document.removeEventListener('mousemove', onMove);
             document.removeEventListener('mouseup', onUp);
-            settings.ui.drawerWidth = hostEl.getBoundingClientRect().width;
+            settings.ui.drawerWidth = panel.getBoundingClientRect().width;
             saveSettings();
         };
         grip.addEventListener('mousedown', (e) => {
             startX = e.clientX;
-            startW = hostEl.getBoundingClientRect().width;
+            startW = panel.getBoundingClientRect().width;
             document.addEventListener('mousemove', onMove);
             document.addEventListener('mouseup', onUp);
             e.preventDefault();
         });
     }
+
+    /** Drag the modal by its letterhead. */
+    function makeDraggable(panel, handle) {
+        if (!handle) return;
+        let sx = 0, sy = 0, ox = 0, oy = 0, dragging = false;
+        handle.addEventListener('mousedown', (e) => {
+            if (e.target.closest('button, a, input, select, textarea')) return;
+            dragging = true;
+            sx = e.clientX;
+            sy = e.clientY;
+            const rect = panel.getBoundingClientRect();
+            ox = rect.left;
+            oy = rect.top;
+            panel.style.position = 'fixed';
+            panel.style.left = `${ox}px`;
+            panel.style.top = `${oy}px`;
+            panel.style.margin = '0';
+            e.preventDefault();
+        });
+        document.addEventListener('mousemove', (e) => {
+            if (!dragging) return;
+            const nx = Math.min(Math.max(-panel.offsetWidth + 120, ox + e.clientX - sx), window.innerWidth - 120);
+            const ny = Math.min(Math.max(0, oy + e.clientY - sy), window.innerHeight - 48);
+            panel.style.left = `${nx}px`;
+            panel.style.top = `${ny}px`;
+        });
+        document.addEventListener('mouseup', () => { dragging = false; });
+    }
+
+    // ESC closes the modal
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && drawerOpen) toggleDrawer(false);
+    });
 
     // --- idle consolidation
     let idleTimer = null;

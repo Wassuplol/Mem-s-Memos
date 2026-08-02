@@ -765,7 +765,7 @@
   top: 14px;
   left: 0; right: 0;
   height: 2px;
-  background: linear-gradient(90deg, transparent, var(--mm-paper-edge) 4%, var(--mm-paper-edge) 96%, transparent);
+  background: linear-gradient(90deg, transparent, rgba(203, 185, 143, .55) 4%, rgba(203, 185, 143, .55) 96%, transparent);
 }
 .mm-timeline-cards { display: flex; gap: 14px; overflow-x: auto; padding: 6px 2px 14px; align-items: flex-start; }
 .mm-eventcard { position: relative; flex: 0 0 210px; }
@@ -1078,33 +1078,50 @@
 .mm-empty .mm-stamp { font-size: 15px; opacity: .65; }
 
 /* ============================================================================
-   LAUNCHER BUTTON (sits in ST top bar / extensions menu)
+   LAUNCHER BUTTON + MODAL DESK HOST (centered overlay, megumin-style)
    ============================================================================ */
 #mm-launcher {
   cursor: pointer;
 }
 .mm-drawer-host {
   position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: 480px;
-  max-width: 96vw;
+  inset: 0;
   z-index: 3000;
-  box-shadow: -18px 0 44px rgba(0, 0, 0, .55);
   display: flex;
-  flex-direction: column;
+  align-items: center;
+  justify-content: center;
 }
 .mm-drawer-host.mm-hidden { display: none; }
+.mm-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(10, 8, 5, .62);
+}
+.mm-modal-panel {
+  position: relative;
+  width: min(920px, 92vw);
+  height: min(860px, 92vh);
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, .7);
+  outline: 1px solid var(--mm-desk-line);
+}
+@media (max-width: 640px) {
+  .mm-modal-panel { width: 100vw; height: 100vh; }
+}
 .mm-resizer {
   position: absolute;
-  left: -4px;
+  left: -3px;
   top: 0;
   bottom: 0;
-  width: 8px;
+  width: 7px;
   cursor: ew-resize;
   z-index: 5;
+  background: transparent;
 }
+.mm-resizer:hover { background: rgba(217, 154, 43, .18); }
+.mm-modal-panel .mm-letterhead { cursor: grab; }
+.mm-modal-panel .mm-letterhead:active { cursor: grabbing; }
 
 /* ============================================================================
    MOTION — all wrapped in prefers-reduced-motion: no-preference
