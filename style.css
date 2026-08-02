@@ -1129,6 +1129,44 @@
 .mm-modal-panel .mm-letterhead { cursor: grab; }
 .mm-modal-panel .mm-letterhead:active { cursor: grabbing; }
 
+/* Floating quick-access button — small brass stamp on the desk edge */
+.mm-fab {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 2990;               /* below the modal desk (3000), above ST chrome */
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  background: linear-gradient(160deg, var(--mm-desk-700, #262019), var(--mm-desk-900, #14110c));
+  border: 1px solid var(--mm-desk-line, #3a3125);
+  color: var(--mm-amber, #d99a2b);
+  font-size: 17px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .45), inset 0 1px 0 rgba(242, 232, 211, .07);
+  opacity: .88;
+  transition: opacity .15s ease, box-shadow .15s ease, border-color .15s ease, transform .15s ease;
+}
+.mm-fab:hover,
+.mm-fab:focus-visible {
+  opacity: 1;
+  border-color: var(--mm-amber, #d99a2b);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .55), 0 0 10px rgba(217, 154, 43, .22);
+  transform: translateY(-1px);
+  outline: none;
+}
+.mm-fab:active { cursor: grabbing; transform: translateY(0); }
+.mm-fab .fa-stamp { pointer-events: none; }
+@media (max-width: 640px) {
+  .mm-fab { width: 40px; height: 40px; font-size: 15px; }
+}
+
 /* ============================================================================
    MOTION — all wrapped in prefers-reduced-motion: no-preference
    ============================================================================ */

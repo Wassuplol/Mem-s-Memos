@@ -563,8 +563,13 @@ test('bureau boots on mockST: ingest → extract → shadow/ON injection at dept
         assert.equal(st.injected.text, '');
         bureau.setMode('on');
         await st.startGeneration();
-        assert.match(st.injected.text, /Mem's Memos/);
-        assert.equal(st.injected.depth, 1, 'default injection depth is 1');
+        // v1.1+: injection happens via the generate_interceptor chat.splice,
+        // never via setExtensionPrompt — assert on the chat array itself.
+        assert.equal(st.injected.text, '', 'setExtensionPrompt is never touched');
+        const entry = st.ctx.chat.find((m) => m.is_system && /Mem's Memos/.test(m.mes || ''));
+        assert.ok(entry, 'interceptor spliced a Mem\'s Memos block into the chat');
+        const fromEnd = st.ctx.chat.length - 1 - st.ctx.chat.indexOf(entry);
+        assert.equal(fromEnd, 1, 'default injection depth is 1 message from the end');
         bureau.stop();
     } finally {
         st.destroy();

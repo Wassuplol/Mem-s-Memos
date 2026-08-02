@@ -9,9 +9,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { escapeHtml } from '../src/utils/helpers.js';
 
-const ROOT = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const css = readFileSync(join(ROOT, 'style.css'), 'utf8');
 const uiFiles = readdirSync(join(ROOT, 'src/ui')).filter((f) => f.endsWith('.js'));
 const uiSource = uiFiles.map((f) => readFileSync(join(ROOT, 'src/ui', f), 'utf8')).join('\n');
@@ -22,6 +23,7 @@ const indexSource = readFileSync(join(ROOT, 'index.js'), 'utf8');
 // ---------------------------------------------------------------------------
 
 test('all design tokens defined exactly as specified', () => {
+    const compact = css.replace(/\s+/g, '');
     const tokens = [
         '--mm-desk-900:#14110c', '--mm-desk-800:#1c1812', '--mm-desk-700:#262019',
         '--mm-desk-line:#3a3125', '--mm-paper:#f2e8d3', '--mm-paper-2:#e9dcc0',
@@ -29,7 +31,7 @@ test('all design tokens defined exactly as specified', () => {
         '--mm-stamp-red:#c23b2a', '--mm-amber:#d99a2b', '--mm-verdigris:#4a9c82',
         '--mm-blue-ink:#4a6fa5', '--mm-faded:rgba(43,36,26,.45)',
     ];
-    for (const t of tokens) assert.ok(css.includes(t), `missing token ${t}`);
+    for (const t of tokens) assert.ok(compact.includes(t), `missing token ${t}`);
 });
 
 test('fonts: Fraunces display, Spline Sans body, IBM Plex Mono, Special Elite stamps', () => {
@@ -125,11 +127,12 @@ test('tabs are a keyboard-navigable tablist with arrow keys', () => {
 });
 
 test('msgdots are additive-only siblings, never touching ST message DOM', () => {
-    assert.ok(indexSource.includes('insertAdjacentElement'), 'sibling insertion');
-    assert.ok(indexSource.includes("'afterend'"), 'inserted AFTER the node');
-    assert.ok(indexSource.includes('MutationObserver'), 're-attach via observer');
-    assert.ok(indexSource.includes('detachMsgDots'), 'teardown path exists');
-    assert.ok(!/classList\.(add|remove)\([^)]*\.mes/.test(indexSource), 'ST message classes never modified');
+    const allSource = `${indexSource}\n${uiSource}`;
+    assert.ok(allSource.includes('insertAdjacentElement'), 'sibling insertion');
+    assert.ok(allSource.includes("'afterend'"), 'inserted AFTER the node');
+    assert.ok(allSource.includes('MutationObserver'), 're-attach via observer');
+    assert.ok(allSource.includes('detachMsgDots'), 'teardown path exists');
+    assert.ok(!/classList\.(add|remove)\([^)]*\.mes/.test(allSource), 'ST message classes never modified');
 });
 
 test('escapeHtml escapes all five dangerous characters', () => {

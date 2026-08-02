@@ -182,7 +182,72 @@ class StHost {
     }
 }
 
+// ---------------------------------------------------------------------------
+// FLOATING DESK BUTTON (fab) — quick access to the Archivist's Desk
+// ---------------------------------------------------------------------------
+const FAB_SIZE = 44;
+const FAB_MARGIN = 8;
+
+function applyFabPosition(btn, pos) {
+    const w = globalThis.innerWidth || 1024;
+    const h = globalThis.innerHeight || 768;
+    let x = pos?.x;
+    let y = pos?.y;
+    if (typeof x !== 'number' || typeof y !== 'number') {
+        x = w - FAB_SIZE - 18;   // default: right edge, just above the chat input area
+        y = h - 150;
+    }
+    x = Math.min(Math.max(FAB_MARGIN, x), Math.max(FAB_MARGIN, w - FAB_SIZE - FAB_MARGIN));
+    y = Math.min(Math.max(FAB_MARGIN, y), Math.max(FAB_MARGIN, h - FAB_SIZE - FAB_MARGIN));
+    btn.style.left = `${x}px`;
+    btn.style.top = `${y}px`;
+    return { x, y };
+}
+
+function mountFab(onClick, settings, onMoved) {
+    if (typeof document === 'undefined') return null; // Node tests: no DOM
+    let btn = document.getElementById('mm-fab');
+    if (btn) btn.remove(); // clean re-wire on re-init
+    btn = document.createElement('div');
+    btn.id = 'mm-fab';
+    btn.className = 'mm-fab';
+    btn.setAttribute('role', 'button');
+    btn.setAttribute('tabindex', '0');
+    btn.setAttribute('aria-label', "Open the Archivist's Desk");
+    btn.setAttribute('title', "Mem's Memos — open the Archivist's Desk (drag to move)");
+    btn.innerHTML = '<i class="fa-solid fa-stamp" aria-hidden="true"></i>';
+    document.body.appendChild(btn);
+
+    let pos = applyFabPosition(btn, settings?.ui?.fab);
+
+    // Drag-to-move with click/drag disambiguation (a small movement still clicks)
+    let sx = 0, sy = 0, ox = 0, oy = 0, moved = false;
+    btn.addEventListener('pointerdown', (e) => {
+        sx = e.clientX; sy = e.clientY; ox = pos.x; oy = pos.y;
+        moved = false;
+        try { btn.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    });
+    btn.addEventListener('pointermove', (e) => {
+        if (e.buttons !== 1) return;
+        if (!moved && Math.hypot(e.clientX - sx, e.clientY - sy) > 6) moved = true;
+        if (!moved) return;
+        pos = applyFabPosition(btn, { x: ox + (e.clientX - sx), y: oy + (e.clientY - sy) });
+    });
+    btn.addEventListener('pointerup', () => {
+        if (moved) onMoved?.(pos);
+    });
+    btn.addEventListener('click', () => { if (!moved) onClick(); });
+    btn.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); }
+    });
+
+    // Keep it inside the viewport on resize
+    globalThis.addEventListener?.('resize', () => { pos = applyFabPosition(btn, pos); });
+    return btn;
+}
+
 class MockHost {
+
     constructor() {
         this.kind = 'mock';
         this.settings = null;
@@ -937,10 +1002,12 @@ export function createBureau(hostInstance) {
         document.addEventListener('mouseup', () => { dragging = false; });
     }
 
-    // ESC closes the modal
-    document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape' && drawerOpen) toggleDrawer(false);
-    });
+    // ESC closes the modal (guard: createBureau must stay importable in Node)
+    if (typeof document !== 'undefined') {
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && drawerOpen) toggleDrawer(false);
+        });
+    }
 
     // --- idle consolidation
     let idleTimer = null;
@@ -989,6 +1056,11 @@ export function createBureau(hostInstance) {
         if (!meta) await rebuildStorage();
         wireEvents();
         host.mountLauncher(() => toggleDrawer());
+        mountFab(
+            () => toggleDrawer(),
+            settings,
+            (pos) => { settings.ui.fab = pos; saveSettings(); },
+        );
         registerSlashCommands(ctx, host);
         armIdleConsolidation();
         desk?.refreshLedger?.(storageLedgerRows());
@@ -1005,11 +1077,18 @@ export function createBureau(hostInstance) {
         unsubscribers.forEach((u) => { try { u?.(); } catch { /* ignore */ } });
         unsubscribers.length = 0;
         clearInterval(idleTimer);
+        disarmUiRefresh();
         desk?.unmount?.();
-        document.getElementById('mm-launcher')?.remove();
-        document.getElementById('mm-drawer-host')?.remove();
+        if (typeof document !== 'undefined') {
+            document.getElementById('mm-launcher')?.remove();
+            document.getElementById('mm-fab')?.remove();
+            document.getElementById('mm-drawer-host')?.remove();
+        }
     }
 
+    // Module-global so globalThis.mmInterceptor can find the live bureau.
+    // (mmInit also assigns this; tests call createBureau directly.)
+    bureau = ctx;
     return Object.assign(ctx, { start, stop, toggleDrawer, storageLedgerRows, _testWireMeta, getScope, settings });
 }
 
@@ -1172,8 +1251,9 @@ if (typeof globalThis.jQuery === 'function') {
         await new Promise((r) => setTimeout(r, 100));
         mmInit();
     });
-} else {
-    // No jQuery — try DOMContentLoaded
+} else if (typeof document !== 'undefined') {
+    // No jQuery — try DOMContentLoaded (browser only; importing this module in
+    // Node for tests must stay side-effect free)
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', () => setTimeout(mmInit, 200));
     } else {

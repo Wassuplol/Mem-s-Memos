@@ -84,6 +84,10 @@ export function createMockST() {
         },
         async startGeneration() {
             await eventSource.emit(event_types.GENERATION_STARTED, {});
+            // Mirror ST 1.18: registered generate_interceptor runs with the chat
+            if (typeof globalThis.mmInterceptor === 'function') {
+                await globalThis.mmInterceptor(chat, 2048, () => false, 'normal');
+            }
         },
         async switchChat(newId) {
             ctx.chatId = newId;

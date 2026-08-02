@@ -83,6 +83,7 @@ export class Desk {
     }
 
     refreshLetterhead() {
+        if (!this.fileMeta || !this.statusStamp) return; // not mounted (headless/tests)
         const scope = this.getScope();
         const s = this.getSettings();
         this.fileMeta.replaceChildren(
@@ -230,6 +231,7 @@ export class Desk {
         this._msgObserver?.disconnect();
         this._msgObserver = null;
         this._dotHosts = new WeakSet();
+        if (typeof document === 'undefined') return; // headless/tests
         document.querySelectorAll('.mm-msgdot-holder').forEach((n) => n.remove());
     }
 

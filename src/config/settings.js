@@ -84,6 +84,7 @@ export const defaultSettings = Object.freeze({
         drawerWidth: 480,
         logLevel: 'info',
         msgDots: true,
+        fab: { x: null, y: null },   // floating desk button position (px from viewport edges; null = default corner)
         ticker: true,
         reducedData: false,
     },
